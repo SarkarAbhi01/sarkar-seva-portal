@@ -1,0 +1,258 @@
+// Seva Portal - Prisma Schema
+// Run `npx prisma migrate dev --name init` after configuring DATABASE_URL
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  SUPERADMIN
+  SUBADMIN
+}
+
+enum AdminStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum ServiceStatus {
+  DRAFT
+  PUBLISHED
+  UNPUBLISHED
+  SUSPENDED
+}
+
+enum OrderStatus {
+  PENDING
+  IN_PROGRESS
+  DOCUMENTS_REQUIRED
+  COMPLETED
+  REJECTED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  UNPAID
+  PAID
+  REFUNDED
+  FAILED
+}
+
+enum DocumentType {
+  CUSTOMER_UPLOAD
+  DELIVERABLE
+}
+
+// -----------------------------
+// Admin Users (Superadmin + Subadmin)
+// -----------------------------
+model Admin {
+  id            String      @id @default(uuid())
+  name          String
+  email         String      @unique
+  phone         String?
+  passwordHash  String
+  role          Role
+  status        AdminStatus @default(ACTIVE)
+
+  // Optional: track if Superadmin collected a fee/subscription from this Subadmin.
+  // Never mandatory for account creation.
+  subscriptionPaid Boolean  @default(false)
+  subscriptionNote String?
+
+  createdById   String?     // Superadmin who created this Subadmin (null for the root superadmin)
+  createdBy     Admin?      @relation("AdminCreatedBy", fields: [createdById], references: [id])
+  createdAdmins Admin[]     @relation("AdminCreatedBy")
+
+  services      Service[]
+  orders        Order[]     @relation("OrderAssignedAdmin")
+  refreshTokens RefreshToken[]
+  activityLogs  ActivityLog[]
+
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@index([role])
+  @@index([status])
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  adminId   String
+  admin     Admin    @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  revoked   Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([adminId])
+}
+
+// -----------------------------
+// Services
+// -----------------------------
+model Service {
+  id              String        @id @default(uuid())
+  title           String
+  tagline         String?
+  description     String
+  category        String?
+  iconUrl         String?
+  imageUrl        String?
+  price           Decimal       @db.Decimal(10, 2)
+  currency        String        @default("INR")
+  estimatedDays   Int?          // estimated delivery time in days
+  requiredDocs    Json?         // array of strings describing required documents
+  termsAndNotes   String?
+  status          ServiceStatus @default(DRAFT)
+
+  ownerId         String        // Admin who owns this service (Superadmin or Subadmin)
+  owner           Admin         @relation(fields: [ownerId], references: [id])
+
+  orders          Order[]
+
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@index([ownerId])
+  @@index([status])
+  @@index([category])
+}
+
+// -----------------------------
+// Public Customers (order placers - lightweight, no admin login required)
+// -----------------------------
+model Customer {
+  id        String   @id @default(uuid())
+  name      String
+  email     String
+  phone     String
+  orders    Order[]
+  createdAt DateTime @default(now())
+
+  @@index([email])
+  @@index([phone])
+}
+
+// -----------------------------
+// Orders
+// -----------------------------
+model Order {
+  id              String        @id @default(uuid())
+  orderNumber     String        @unique // human-friendly tracking code, e.g. SP-2026-000123
+
+  serviceId       String
+  service         Service       @relation(fields: [serviceId], references: [id])
+
+  // Denormalized owner reference for fast permission checks / filtering
+  ownerId         String
+  owner           Admin         @relation("OrderAssignedAdmin", fields: [ownerId], references: [id])
+
+  customerId      String
+  customer        Customer      @relation(fields: [customerId], references: [id])
+
+  status          OrderStatus   @default(PENDING)
+  paymentStatus   PaymentStatus @default(UNPAID)
+  amount          Decimal       @db.Decimal(10, 2)
+
+  // Razorpay integration fields
+  razorpayOrderId   String?     @unique
+  razorpayPaymentId String?
+  razorpaySignature String?
+
+  notes           String?
+  adminRemarks    String?
+
+  // One-time token (hashed) given to the customer at order placement so that
+  // only the person who placed the order can upload documents against it.
+  uploadTokenHash String?       @unique
+  uploadTokenExpiresAt DateTime?
+
+  documents       OrderDocument[]
+  statusHistory   OrderStatusHistory[]
+  pushSubscriptions PushSubscription[]
+
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@index([ownerId])
+  @@index([serviceId])
+  @@index([customerId])
+  @@index([status])
+}
+
+model OrderDocument {
+  id        String   @id @default(uuid())
+  orderId   String
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  fileName  String
+  fileUrl   String
+  fileType  String?
+  type      DocumentType @default(CUSTOMER_UPLOAD) // CUSTOMER_UPLOAD = doc from customer, DELIVERABLE = completed work from admin
+  uploadedAt DateTime @default(now())
+
+  @@index([orderId])
+}
+
+// Browser push subscriptions, scoped per-order (a customer opts in while
+// tracking a specific order, so we know which order to notify them about).
+model PushSubscription {
+  id        String   @id @default(uuid())
+  orderId   String
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  createdAt DateTime @default(now())
+
+  @@index([orderId])
+}
+
+model OrderStatusHistory {
+  id        String      @id @default(uuid())
+  orderId   String
+  order     Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  status    OrderStatus
+  changedById String?
+  note      String?
+  createdAt DateTime    @default(now())
+
+  @@index([orderId])
+}
+
+// -----------------------------
+// Portal Content (Superadmin-managed site settings)
+// -----------------------------
+model PortalSettings {
+  id            String   @id @default("singleton")
+  portalName    String   @default("Seva Portal")
+  logoUrl       String?
+  homepageHero  Json?    // { headline, subheadline, ctaPrimary, ctaSecondary, imageUrl }
+  footerLinks   Json?    // array of { label, url }
+  contactEmail  String?
+  contactPhone  String?
+  contactAddress String?
+  termsContent  String?
+  privacyContent String?
+  updatedAt     DateTime @updatedAt
+}
+
+// -----------------------------
+// Activity / Audit Log
+// -----------------------------
+model ActivityLog {
+  id        String   @id @default(uuid())
+  adminId   String?
+  admin     Admin?   @relation(fields: [adminId], references: [id])
+  action    String
+  meta      Json?
+  createdAt DateTime @default(now())
+
+  @@index([adminId])
+  @@index([action])
+}
