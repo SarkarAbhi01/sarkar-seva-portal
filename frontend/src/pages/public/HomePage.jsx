@@ -13,21 +13,47 @@ export default function HomePage() {
   const [services, setServices] = useState([]);
   const [settings, setSettings] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [btnLoading, setBtnLoading] = useState(false); 
 
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(true);
+
+  
   useEffect(() => {
-    (async () => {
-      try {
-        const [svcRes, settingsRes] = await Promise.all([
-          api.get('/public/services', { params: { limit: 6 } }),
-          api.get('/public/settings'),
-        ]);
-        setServices(svcRes.data.data);
-        setSettings(settingsRes.data.settings);
-      } finally {
-        setLoading(false);
-      }
-    })();
+    api.get('/public/settings')
+      .then(res => setSettings(res.data.settings))
+      .catch(err => console.error("Settings Error:", err));
   }, []);
+
+  
+  useEffect(() => {
+    if (page === 1) {
+      setLoading(true);
+    } else {
+      setBtnLoading(true);
+    }
+    
+    api.get('/public/services', { params: { page: page, limit: 6 } })
+      .then((svcRes) => {
+        const newServices = svcRes.data.data || [];
+
+        if (page === 1) {
+          setServices(newServices);
+        } else {
+          setServices((prev) => [...prev, ...newServices]);
+        }
+
+        
+        if (newServices.length < 6) {
+          setHasMore(false);
+        }
+      })
+      .catch(err => console.error("Services Load Error:", err))
+      .finally(() => {
+        setLoading(false);
+        setBtnLoading(false);
+      });
+  }, [page]);
 
   const hero = settings?.homepageHero || {};
 
@@ -72,10 +98,33 @@ export default function HomePage() {
         ) : services.length === 0 ? (
           <p className="text-center text-gray-400">No services available right now. Please check back soon.</p>
         ) : (
-          <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-            {services.map((s) => (
-              <ServiceCard key={s.id} service={s} />
-            ))}
+          <div>
+            {/* Services Grid */}
+            <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+              {services.map((s) => (
+                <ServiceCard key={s.id} service={s} />
+              ))}
+            </div>
+
+            {/* 🔽 लोड मोर बटन का लॉजिक (Tailwind CSS के साथ) 🔽 */}
+            <div className="mt-12 flex flex-col items-center justify-center">
+              {hasMore && (
+                <button
+                  onClick={() => setPage((prev) => prev + 1)}
+                  disabled={btnLoading}
+                  className="rounded-lg bg-brand-600 px-6 py-2.5 text-sm font-semibold text-white shadow transition hover:bg-brand-700 disabled:opacity-50"
+                >
+                  {btnLoading ? 'Loading...' : 'Load More / और दिखाएँ'}
+                </button>
+              )}
+
+              {/* सारा डेटा लोड होने के बाद मैसेज */}
+              {!hasMore && services.length > 0 && (
+                <p className="text-sm text-gray-400 italic">
+                  ✓ सभी सेवाएँ लोड हो चुकी हैं / All services loaded.
+                </p>
+              )}
+            </div>
           </div>
         )}
       </section>
