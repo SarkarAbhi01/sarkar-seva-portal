@@ -2,7 +2,14 @@ import axios from 'axios';
 
 const api = axios.create({
   baseURL: '/api',
-  withCredentials: true, // send the httpOnly refresh-token cookie
+  withCredentials: true,
+});
+
+// Refresh ke liye separate client.
+// Iske andar auth interceptor nahi hai.
+const refreshClient = axios.create({
+  baseURL: '/api',
+  withCredentials: true,
 });
 
 let accessToken = null;
@@ -17,49 +24,79 @@ export function getAccessToken() {
 }
 
 api.interceptors.request.use((config) => {
-  if (accessToken) config.headers.Authorization = `Bearer ${accessToken}`;
+  if (accessToken) {
+    config.headers = config.headers || {};
+    config.headers.Authorization = `Bearer ${accessToken}`;
+  }
+
   return config;
 });
 
-// Endpoints that must NEVER trigger the retry-refresh flow themselves —
-// otherwise a 401 from /auth/refresh (e.g. anonymous visitor, no session yet)
-// re-triggers another refresh attempt, which also 401s, forever.
-const AUTH_ENDPOINTS = ['/auth/refresh', '/auth/login'];
+const AUTH_ENDPOINTS = [
+  '/auth/refresh',
+  '/auth/login',
+  '/api/auth/refresh',
+  '/api/auth/login',
+];
 
 function isAuthEndpoint(url = '') {
   return AUTH_ENDPOINTS.some((p) => url.includes(p));
 }
 
-// On a 401, try refreshing the access token exactly once, then retry the original request.
 api.interceptors.response.use(
-  (res) => res,
+  (response) => response,
+
   async (error) => {
     const original = error.config;
 
-    // Never intercept the auth endpoints' own 401s — let the caller (e.g. AuthContext)
-    // handle "not logged in" as a normal, expected state instead of looping.
-    if (error.response?.status === 401 && !original._retry && !isAuthEndpoint(original.url)) {
+    if (
+      error.response?.status === 401 &&
+      original &&
+      !original._retry &&
+      !isAuthEndpoint(original.url)
+    ) {
       original._retry = true;
+
       try {
         if (!refreshPromise) {
-          refreshPromise = axios.post('/api/auth/refresh', {}, { withCredentials: true });
+          refreshPromise = refreshClient
+            .post('/auth/refresh', {})
+            .finally(() => {
+              refreshPromise = null;
+            });
         }
+
         const { data } = await refreshPromise;
-        refreshPromise = null;
-        setAccessToken(data.accessToken);
-        original.headers.Authorization = `Bearer ${data.accessToken}`;
-        return api(original);
-      } catch (refreshErr) {
-        refreshPromise = null;
-        setAccessToken(null);
-        // Only force-navigate if we're not already on a public/login page —
-        // avoids a reload loop when the visitor was never logged in to begin with.
-        if (window.location.pathname.startsWith('/admin') && window.location.pathname !== '/admin/login') {
-          window.location.href = '/admin/login';
+
+        if (!data?.accessToken) {
+          throw new Error('Refresh response did not contain accessToken');
         }
+
+        setAccessToken(data.accessToken);
+
+        original.headers = original.headers || {};
+        original.headers.Authorization =
+          `Bearer ${data.accessToken}`;
+
+        return api(original);
+
+      } catch (refreshErr) {
+        setAccessToken(null);
+
+        if (
+          window.location.pathname !== '/admin/login' &&
+          window.location.pathname !== '/login'
+        ) {
+          window.location.href =
+            window.location.pathname.startsWith('/admin')
+              ? '/admin/login'
+              : '/login';
+        }
+
         return Promise.reject(refreshErr);
       }
     }
+
     return Promise.reject(error);
   }
 );
